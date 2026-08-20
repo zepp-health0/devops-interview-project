@@ -1,43 +1,46 @@
-# 实施说明与决策记录
+# Implementation Notes & Decision Record
 
-> 只记录这次提交中真实发生的假设、决策和证据。请引用具体文件、job、命令或运行结果；保持简洁，建议全文不超过 1,500 字。
+## 1. Key assumptions
 
-## 1. 关键假设
+**No cloud credentials are provisioned for this exercise.** The CI `deploy` job therefore targets the GitHub Actions runner itself — pull the just-published image, run it, poll `/healthz`, tear down — rather than a persistent remote host. If a real target (VM, k8s namespace) were available, `deploy` would swap to `kubectl apply` / `docker context` against it, and the rollback unit would shift from "delete the runner container" to "redeploy the previous SHA tag."
 
-列出这次实现依赖的 3 个关键假设，例如部署边界、团队协作方式、流量特征或外部平台能力。
+**The observability stack is a local demo, not internet-facing.** Grafana runs on default `admin/admin` over plain HTTP (`docker-compose.yml`). That's acceptable per the assignment FAQ ("must I deploy to a public environment? No"), but it is not shippable as-is — any public exposure needs real auth and TLS first.
 
-对每个假设说明：为什么需要做这个假设，以及如果它不成立，当前方案哪里需要改变。不要把假设写成已知事实。
+**Single-replica, in-memory state is acceptable for this assignment.** `MemoryStore` (`store.go`) has no persistence; a restart drops all tasks. The `Store` interface already isolates this, so a persistent implementation can be swapped in without touching `handler.go`, but nothing here has been built or tested against real state loss.
 
-## 2. 交付链路
+## 2. Delivery path
 
-从一次 pull/merge request 开始，说明代码经过哪些实际 job，在哪个事件发布镜像、如何标识制品、部署到哪里，以及失败时回滚的最小单位。
+A PR against `main` runs `validate` (`go vet` + `go test -race`) and `build-image` (build + enforce the 15 MiB / non-root constraints from `.github/workflows/ci.yml`) — no external side effects, so a fork PR is safe to run automatically.
 
-请引用你的 workflow job、部署命令和镜像标识。若某一步因缺少外部环境未实际执行，明确写出验证边界。
+A push to `main` runs those same two jobs plus `publish` (tag `ghcr.io/cliffseriex/devops-interview-project` with both `:<commit-sha>` and `:latest`, using the ephemeral `GITHUB_TOKEN` — no stored PAT) and `deploy` (pull the image **by that exact SHA tag**, run it, smoke-test `/healthz`, tear down). The image is built exactly once in `build-image` and passed to `publish`/`deploy` via `actions/upload-artifact`, so the bits that passed the constraint check are the bits that get published — not a second, potentially-different build.
 
-## 3. 一次实际验证或排查
+Real run, all four jobs green in under 3 minutes: `https://github.com/cliffseriex/devops-interview-project/actions/runs/32342047654` (commit `6355504`). The `deploy` job's own `docker pull ghcr.io/.../devops-interview-project:6355504` succeeding is the traceability proof — a wrong or missing tag would have failed that step.
 
-选择本题中的一个风险假设、运行结果或观测信号，记录你如何确认它：
+**Rollback unit**: one image tag. Every commit on `main` produces an immutable `:<sha>` image; rolling back means re-running the deploy step against the previous SHA tag — no rebuild required.
 
-- 你想验证什么，原先预期是什么；
-- 执行了什么命令、查询或实验；
-- 哪条证据支持或推翻了预期；
-- 你是否修改了实现；
-- 如果修改了，复测结果是什么；如果没有，为什么当前证据足够。
+**Validation boundary**: the "deploy" target is the CI runner, not a long-lived host — documented here per the README's guidance for when an external environment isn't available.
 
-不要求必须遇到故障，也不要写虚构事故预案。
+## 3. One real investigation
 
-## 4. 两个工程取舍
+Validating Task 3C (`docker-compose.yml` + `monitoring/`), I generated ~45 mixed CRUD requests locally and expected the dashboard's request/latency/task-state panels to reflect them. Instead, `task_api_http_requests_total` showed nearly all `GET/PUT/DELETE /tasks/{id}` calls as `route="unmatched", status="404"`, and `task_api_tasks_state{state="done"}` stayed at 0 despite several "mark done" calls in the script.
 
-选择你实际做出的两个取舍。每个取舍说明：当时的约束、考虑过的选项、最终选择、验证方式、仍然存在的风险，以及什么新条件会让你改变选择。
+To isolate app bug vs. instrumentation bug vs. bad experiment, I ran a manual `curl http://localhost:8080/tasks/0` directly: it returned `200` and showed up in `/metrics` correctly labeled `route="/tasks/{id}"`. That ruled out the app and the metrics middleware. The remaining suspect was the traffic-generation script itself — it used bash-style `${ids[0]}` to reference the first captured task ID, but the shell running these commands is **zsh**, where arrays are 1-indexed by default, so `ids[0]` was silently empty and every "act on an existing task" call hit `/tasks/` (no ID) instead of a real one.
 
-## 5. 实际投入
+I fixed the script (`ids[1]` instead of `ids[0]`), reset the in-memory store, and reran: results matched expectations exactly — 200s on valid IDs, the scripted 9/45 `400`s and 6/45 `404`s at the expected rate, `tasks_state{done}` incrementing on real updates, P50/P95/P99 in the low-millisecond range (expected for an in-memory store with no I/O). I did not change the application or the metrics code — the evidence pointed entirely at the test harness. Separately, this run also caught a real dashboard bug: the error-rate panel's query returned an *empty* vector (not `0`) when no 5xx had ever occurred, which renders as a blank panel indistinguishable from "broken." Fixed with `... or vector(0)` in `monitoring/grafana/provisioning/dashboards/task-api.json`.
 
-2–3 小时是建议投入，不是硬性上限。
+## 4. Two engineering trade-offs
 
-- 实际投入时间：
-- 主动没有做的内容及原因：
-- 如果再有 60 分钟，下一步会做什么：
+**Distroless + self-check healthcheck vs. a debug-friendly base.** Constraint: image must be under 15 MiB and Docker must actually report `healthy`. Alpine + curl makes `HEALTHCHECK` trivial but costs size headroom that mattered once `client_golang` added ~4 MiB (7.8 → 11.7 MiB). I chose `gcr.io/distroless/static-debian12:nonroot` plus a `-healthcheck` flag baked into the same Go binary, so `HEALTHCHECK CMD ["/task-api", "-healthcheck"]` works without a shell. Cost: no `docker exec sh` for live debugging. If that became a real blocker, I'd add the distroless `:debug` variant as a manually-pulled companion rather than reverting the prod image.
 
-## 6. AI 协作
+**Runner-local deploy vs. no real deploy step.** Constraint: no cloud credentials for this exercise, but the assignment forbids `echo`/pseudocode deploy steps. I made `deploy` real but scoped to the runner (pull → run → health-poll → teardown) rather than skip or fake it. Risk: this proves the artifact boots and passes its own health check, but says nothing about a real target's networking or resource limits. Given real cloud access, I'd point this same job at that target and keep the runner-local version as a pre-deploy smoke test.
 
-如果使用了 AI，记录一处你修改或拒绝其输出的具体例子，并写出你依靠什么证据发现问题。若未使用，写“未使用”。
+## 5. Actual time / unfinished / next steps
+
+- **Time spent**: ~3 hours across Tasks 1–3, verified against a live Docker daemon and a real GitHub Actions run rather than written and assumed correct.
+- **Deliberately not done**: image vulnerability scanning, graceful shutdown, an alert rule with a fire/recover cycle, staging→production promotion — none attempted, to keep the core checklist solid rather than spreading thin.
+- **GHCR listing not independently verified via API** — the PAT here wasn't scoped for `packages:read`. Relied on `deploy`'s successful `docker pull` by SHA tag instead, which is arguably stronger evidence (the actual consumer, not just a listing).
+- **Next 60 minutes**: graceful shutdown (SIGTERM + drain) paired with a readiness endpoint, since the healthcheck plumbing already exists; then one alert rule (5xx rate > 5% for 5m) with a deliberately triggered and recovered test.
+
+## 6. AI collaboration
+
+Claude wrote the local traffic-generation script used to validate Task 3C with bash-style array indexing (`${ids[0]}`), which is wrong for this environment's zsh shell (1-indexed arrays) — see Section 3. It self-caught this via a manual isolation test rather than assuming the dashboard was correct, then fixed the script and reran to confirm. This is the most concrete example from this session: a tool-generated artifact was wrong in a way that would have produced a misleading validation result if not checked against a second, independent method (a raw manual `curl`).

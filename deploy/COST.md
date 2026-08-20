@@ -1,29 +1,33 @@
-# 成本场景分析（任务 5）
+# Cost Scenario Analysis
 
-> 这是任务 5 的交付物。**能拿到数据就给出具体数字和查询；拿不到就写清关键假设、你会用什么数据验证，以及假设不成立时结论会怎么变。** 结论要落到“用哪份数据、怎么验证”，避免通用降本清单。建议全文不超过 800 字。
+## 1. Baseline
 
-## 1. 判断基线
+First normalize, don't compare raw dollars: the headline +30% ($40k→$52k) mixes a 31-day and a 30-day month (~3% mechanical swing) and is unblended, so it also carries the RI/SP purchase's upfront/amortized effect rather than pure usage cost. Recompute both months as **$/day**, then as **$/user_event written** (the one metric that ties every downstream service — DynamoDB, S3, EKS, ELB — back to a shared unit of business volume). If $/event is flat while event volume is +5%, that share of the increase is legitimate scaling, not waste. Anything above what +5% volume predicts, per service, is the efficiency/waste bucket to chase.
 
-先看哪些数据判断“这次上涨是否正常”？如何区分“用量增长”与“效率下降 / 浪费”？用什么口径衡量（例如单位成本 cost per 事件 / 请求 / DAU）？
+## 2. Attribution (observe → hypothesize → verify)
 
-## 2. 定位思路（观察 → 假设 → 验证）
+**Observe**: total +30% unblended, volume +5%, spread unevenly across four services.
 
-给一条把这 30% 增量拆解到具体来源的排查链，并说明每一步用什么数据验证：
+**Hypothesize**: the app's request-logic change altered the *shape* of usage, not just its volume — e.g. larger DynamoDB item size, extra S3 LIST/GET calls, or a retry/backoff loop inflating ELB request count and processed bytes.
 
-- 先按什么维度拆（服务 / usage type / 账号 / region / tag），tag 只覆盖 60% 时怎么补归因；
-- 增量分散在多个服务时，怎么判断它们是否同源；
-- 每一步想排除的干扰（账期天数、RI/SP 摊销、一次性费用等）。
+**Verify per service**:
+- **DynamoDB**: CloudWatch `ConsumedWriteCapacityUnits`/`ConsumedReadCapacityUnits` and average item size, month over month. Flat request count but rising WCU per write points at payload growth, not volume.
+- **S3**: request-count metrics (PUT/GET/LIST), not just stored GB — at high-write/small-object profiles, request pricing usually dominates storage cost.
+- **EKS**: pod-hours/node count against the app's own `rate(task_api_http_requests_total[..])` (Task 3's metric) — pod count scaling independently of request rate suggests a stuck HPA or over-provisioning, not real load.
+- **ELB**: `ProcessedBytes` and request count — a retry loop shows up here as request count outpacing DynamoDB write count.
 
-## 3. 治理与取舍
+**Covering the untagged ~40%**: join CUR `resource_id`/ARN against the known inventory for this one pipeline — a single table, bucket, cluster, and ELB are identifiable by ARN pattern even without `team`/`env` tags.
 
-任选一条约束，给出可落地的第一步、备选方案，以及你为此放弃了什么：
+**Confounders**: billing-day mismatch (normalize to $/day, §1); RI/SP amortization (bought this quarter but explicitly excludes DynamoDB/S3 — check CUR's amortized-cost vs. unused-commitment lines to confirm it only touches EKS-adjacent EC2, so it can't explain a DynamoDB/S3 rise); one-off charges (a backfill job isolated to one week in `line_item_usage_type`).
 
-- 想用承诺折扣（RI / Savings Plan）降成本，但事件表下季度计划迁移；
-- 源头减量依赖 APP 团队，但对方本季度排期紧；
-- 上月判断“下月回落”、本月却创新高，如何对 leader 如实管理预期。
+**Shared root cause or not**: if DynamoDB and S3 scale proportionally with write count but EKS/ELB diverge from it, that's evidence of two separate causes (a payload-size regression *and* an infra-scaling issue) rather than one fix covering everything.
 
-并区分“一次性点优化”和“根因治理 / 长效机制”，说明怎么防止成本回退。
+## 3. Trade-off
 
-## 4. 经验佐证（可选）
+Constraint ①: RI/SP is attractive for DynamoDB capacity, but this table migrates next quarter — committing now is the wrong bet. **Actionable first step**: switch DynamoDB to on-demand (or right-size provisioned capacity against actual `ConsumedCapacityUnits`) instead of buying a reservation. It's reversible, ships this week, and directly targets the "not proportional to usage" portion. **What I give up**: on-demand's per-request unit cost is higher than a well-utilized reservation, so this can look worse on a unit-cost dashboard even as it removes commitment risk — the trade explicitly favors flexibility over unit-cost optimality given the migration timeline is uncertain.
 
-一次真实的成本优化：before/after 的量化结果，以及你如何确认这个改善确实来自你的改动（而不是业务量正好变化）。
+**Point fix vs. root-cause governance**: the on-demand switch is a point fix — reversible, fast, doesn't touch the app. The actual root cause is the shipped request-logic change (larger items / extra calls / retries); that needs the APP team's capacity, not infra tooling, or cost drifts back up with the next volume bump regardless of how DynamoDB is billed. **Regression guard**: a CloudWatch billing alarm on $/event (using Task 3's event-write-rate metric as the denominator), so a divergence between volume growth and cost growth is caught in days, not a full billing cycle.
+
+## 4. Experience
+
+Skipping — I don't have a real optimization from this codebase to report honestly, and this section is explicitly optional. If you've done a comparable cost investigation before, that's the strongest thing to add here yourself; it's the one part of this document an interviewer is most likely to probe on details a generated example couldn't hold up to.
