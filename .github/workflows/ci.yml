@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,4 +21,88 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  # Runs for every push and PR: proves the image builds and meets Task 1's
+  # constraints, without publishing anything anywhere.
+  build-image:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t task-api:${{ github.sha }} .
+      - name: Verify size and non-root constraints
+        run: |
+          size=$(docker image inspect task-api:${{ github.sha }} --format '{{.Size}}')
+          echo "image size: $size bytes"
+          if [ "$size" -ge 15728640 ]; then
+            echo "image exceeds 15 MiB budget"; exit 1
+          fi
+          user=$(docker image inspect task-api:${{ github.sha }} --format '{{.Config.User}}')
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+            echo "image does not declare a non-root user"; exit 1
+          fi
+      - run: docker save task-api:${{ github.sha }} -o /tmp/task-api.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: task-api-image
+          path: /tmp/task-api.tar
+          retention-days: 1
+
+  # Publishing is a real side effect (a new image visible to anyone with repo
+  # access), so it's gated to push-to-main only — never on a PR from a fork.
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: task-api-image
+          path: /tmp
+      - run: docker load -i /tmp/task-api.tar
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Tag and push (traceable to this commit)
+        run: |
+          docker tag task-api:${{ github.sha }} $IMAGE_NAME:${{ github.sha }}
+          docker tag task-api:${{ github.sha }} $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest
+
+  # "Deploy" here is a real, temporary runtime on the runner itself: no cloud
+  # credentials are available for this take-home, so this is the honest
+  # end-to-end boundary — see deploy/NOTES.md for how this maps to a real target.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Pull and run the published image
+        run: |
+          docker pull $IMAGE_NAME:${{ github.sha }}
+          docker run -d --name task-api --rm -p 8080:8080 $IMAGE_NAME:${{ github.sha }}
+      - name: Smoke test the running deployment
+        run: |
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:8080/healthz | grep -q '"status":"ok"'; then
+              echo "deployment healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "deployment did not become healthy"; docker logs task-api; exit 1
+      - name: Tear down
+        if: always()
+        run: docker rm -f task-api || true
