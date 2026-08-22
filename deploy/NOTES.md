@@ -14,11 +14,13 @@ Push → `main` runs those same two plus `publish` (GHCR, tagged with the commit
 
 The image is built once in `build-image` and handed to publish/deploy as an artifact, so what gets published is literally what passed the constraint checks, not a second build that could've drifted.
 
-Real run, all 4 jobs green in under 3 min: `.../actions/runs/32342047654` (commit `6355504`). `deploy` successfully pulling that exact SHA tag is the traceability proof — wrong tag, that step fails.
+Actual PR into this repo: https://github.com/zepp-health0/devops-interview-project/pull/2 (branch `cliffseriex:main`). Its CI run shows `action_required` — GitHub gates Actions runs from first-time external contributors behind maintainer approval on public repos, so it won't execute until someone with write access here clicks approve. That's the platform working as intended, not a failure on my side, and it's also a live example of the same "what side effects should a PR be allowed" question Task 2 asks about — a fork PR shouldn't get to run unsupervised against someone else's repo.
+
+Since I only have read access here, I can't push to this repo's own `main` to demonstrate the `publish`/`deploy` path directly. I proved that path end-to-end on my own fork instead: all 4 jobs green in under 3 minutes, `github.com/cliffseriex/devops-interview-project-scratch/actions/runs/32342047654` (commit `6355504`, same code as this PR). `deploy` there successfully pulling the image by that exact SHA tag is the traceability proof — wrong tag, that step fails.
 
 Rollback unit is one image tag — every commit gets an immutable image, rolling back is just pointing deploy at the previous one.
 
-Worth being upfront: "deploy" here targets the CI runner, not a persistent host, because there's no cloud environment for this exercise.
+Worth being upfront: "deploy" targets the CI runner, not a persistent host, because there's no cloud environment for this exercise.
 
 ## 3. One real investigation (Task 3C)
 
