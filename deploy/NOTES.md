@@ -2,49 +2,49 @@
 
 ## 1. Key assumptions
 
-**No cloud credentials are provisioned for this exercise.** The CI `deploy` job targets the GitHub Actions runner itself — pull, run, poll `/healthz`, tear down — rather than a persistent host. With a real target, `deploy` would swap to `kubectl apply` / `docker context`, and the rollback unit would shift from "delete the runner container" to "redeploy the previous SHA tag."
-
-**The observability stack is a local demo, not internet-facing.** Grafana runs on default `admin/admin` over plain HTTP. Acceptable per the FAQ ("must I deploy publicly? No"), but not shippable as-is — public exposure needs real auth and TLS first.
-
-**Single-replica, in-memory state is acceptable here.** `MemoryStore` has no persistence; a restart drops all tasks. `Store` is already an interface, so a persistent implementation swaps in without touching `handler.go` — but that's untested, since nothing here has been run against real state loss.
+- No cloud creds for this exercise. The `deploy` job just pulls the image, runs it, checks `/healthz`, kills it — not a real host. With an actual target I'd swap that for `kubectl apply` or similar, and rollback becomes "redeploy the previous SHA tag" instead of "delete the runner container."
+- Grafana's on default `admin/admin`, plain HTTP. Fine for local (README says public deployment isn't required) but I wouldn't ship it like this.
+- Store is in-memory, restart wipes it. `Store` is already an interface so swapping in something persistent later is easy, but I haven't actually tested that path — just assuming it works.
 
 ## 2. Delivery path
 
-A PR against `main` runs `validate` (`go vet` + `go test -race`) and `build-image` (build + enforce the 15 MiB / non-root constraints from `.github/workflows/ci.yml`) — no external side effects, so a fork PR is safe to run automatically.
+PR → `main` runs `validate` (vet + test) and `build-image` (build, then check size/non-root in CI). No side effects, safe for a fork PR.
 
-A push to `main` runs those same two jobs plus `publish` (tag `ghcr.io/cliffseriex/devops-interview-project` with both `:<commit-sha>` and `:latest`, using the ephemeral `GITHUB_TOKEN` — no stored PAT) and `deploy` (pull the image **by that exact SHA tag**, run it, smoke-test `/healthz`, tear down). The image is built exactly once in `build-image` and passed to `publish`/`deploy` via `actions/upload-artifact`, so the bits that passed the constraint check are the bits that get published — not a second, potentially-different build.
+Push → `main` runs those same two plus `publish` (GHCR, tagged with the commit SHA and `latest`, uses `GITHUB_TOKEN` — nothing stored) and `deploy` (pulls by SHA, runs it, polls `/healthz`, tears down).
 
-Real run, all four jobs green in under 3 minutes: `https://github.com/cliffseriex/devops-interview-project/actions/runs/32342047654` (commit `6355504`). The `deploy` job's own `docker pull ghcr.io/.../devops-interview-project:6355504` succeeding is the traceability proof — a wrong or missing tag would have failed that step.
+The image is built once in `build-image` and handed to publish/deploy as an artifact, so what gets published is literally what passed the constraint checks, not a second build that could've drifted.
 
-**Rollback unit**: one image tag. Every commit on `main` produces an immutable `:<sha>` image; rolling back means re-running the deploy step against the previous SHA tag — no rebuild required.
+Real run, all 4 jobs green in under 3 min: `.../actions/runs/32342047654` (commit `6355504`). `deploy` successfully pulling that exact SHA tag is the traceability proof — wrong tag, that step fails.
 
-**Validation boundary**: the "deploy" target is the CI runner, not a long-lived host — documented here per the README's guidance for when an external environment isn't available.
+Rollback unit is one image tag — every commit gets an immutable image, rolling back is just pointing deploy at the previous one.
+
+Worth being upfront: "deploy" here targets the CI runner, not a persistent host, because there's no cloud environment for this exercise.
 
 ## 3. One real investigation (Task 3C)
 
-**Expectation, written before running `scripts/generate-traffic.sh`**: a mix of successful creates/reads/updates/deletes plus deliberate 400s (missing title, every 5th create) and 404s (unknown id, every 7th read) should move the "request rate by status" panel across five status codes, keep "error rate" flat at 0 (the app has no 5xx path), show P50/P95/P99 in the low-millisecond range (in-memory store, no I/O), and shift `task_api_tasks_state` from all-pending toward some `done` as the script's "mark done" calls land.
+Before running the traffic script I wrote down what I expected: all 5 status codes showing up on the request panel, error rate flat at 0 (app has no 5xx path), latency in low ms, task state shifting from all-pending to some done.
 
-**Result — first run, ~45 requests**: request-count panel matched (200/201/400/404/204 all present), but `task_api_tasks_state{state="done"}` stayed at 0 despite scripted updates, and nearly every `GET/PUT/DELETE /tasks/{id}` call showed as `route="unmatched", status="404"` instead of `route="/tasks/{id}"` — a clear mismatch against the "task state should move" and "route should be labeled correctly" expectations.
+First run (45 requests): request counts looked right, but task state never moved, and almost every `/tasks/{id}` call showed up as `route="unmatched", status="404"` instead of hitting the route properly.
 
-**Anomaly investigation — service vs. observability vs. experiment**: to isolate which layer was wrong, I ran a manual `curl http://localhost:8080/tasks/0` directly, outside the script: it returned `200` and showed up in `/metrics` correctly labeled `route="/tasks/{id}"`. That ruled out both the app and the metrics middleware — the remaining suspect was the traffic-generation script itself. It used bash-style `${ids[0]}` to reference the first captured task ID, but the shell running these commands is **zsh**, where arrays are 1-indexed by default, so `ids[0]` was silently empty and every "act on an existing task" call hit `/tasks/` (no ID) instead of a real one — a bad experiment, not a service or observability defect.
+Ran a manual `curl /tasks/0` outside the script to check — worked fine, 200, correctly labeled in `/metrics`. So the app and the metrics code were fine, it had to be the script. Turned out it used `${ids[0]}` to grab the first task id — this shell is zsh, which is 1-indexed, so that was silently empty and every request was hitting `/tasks/` with no id at all.
 
-**Decision and rerun**: rather than patch the symptom (swap `ids[0]` → `ids[1]`) and move on, I rewrote the script (`scripts/generate-traffic.sh`) to use a plain temp file as a FIFO queue instead of a shell array at all, so it can't regress under either bash or zsh indexing. Reran against a reset store: results matched expectations exactly — correct route labels, `400`/`404` at the scripted rate, `tasks_state{done}` incrementing on real updates, P50/P95/P99 sub-5ms.
+Fixed the script properly (temp file instead of an array, so it can't happen again under either shell) and reran. Everything matched this time: correct routes, 400/404 at the rate the script targets, task state moving, latency sub-5ms.
 
-**Signal selected for further confirmation — error rate**: I picked this one deliberately because it's the panel on-call would trust *not to page falsely*, so a wrong "no error" reading is worse than a wrong "error" reading. Confirming it meant checking what the query returns when zero 5xx have ever occurred, not just when they have. It returned an **empty vector**, not `0` — Prometheus doesn't materialize a time series for a label combination that's never been observed. An empty vector renders as a blank panel in Grafana, which is visually indistinguishable from "the datasource is broken," exactly the kind of false alarm this signal shouldn't produce. Fixed with `... or vector(0)` in `monitoring/grafana/provisioning/dashboards/task-api.json`, confirmed the query now returns `0` instead of empty.
+Also dug into the error-rate panel specifically, since a false "no errors" reading is the worst kind of wrong for on-call to trust. The query returned an empty result (not `0`) when there'd never been a 5xx — renders as a blank panel, looks identical to "broken." Added `or vector(0)` to fix it.
 
-## 4. Two engineering trade-offs
+## 4. Two trade-offs
 
-**Distroless + self-check healthcheck vs. a debug-friendly base.** Constraint: under 15 MiB, Docker must actually report `healthy`. Alpine + curl makes `HEALTHCHECK` trivial but costs headroom that mattered once `client_golang` added ~4 MiB (7.8 → 11.7 MiB). Chose `distroless/static-debian12:nonroot` plus a `-healthcheck` flag on the same binary, since `HEALTHCHECK CMD` needs to work without a shell. Cost: no `docker exec sh` for live debugging — if that bit, I'd add the distroless `:debug` variant as a companion image, not revert the prod one.
+**Distroless + a `-healthcheck` flag on the binary**, instead of Alpine + curl. Distroless has no shell, so `HEALTHCHECK` can't exec anything except the app itself — hence the flag. Costs debuggability (no `docker exec sh` into a running container). I'd reconsider if that actually became a problem in practice — add the distroless debug variant as a separate image rather than switch the main one back.
 
-**Runner-local deploy vs. no real deploy step.** Constraint: no cloud credentials, but the assignment forbids `echo`/pseudocode deploys. Made `deploy` real but scoped to the runner (pull → run → health-poll → teardown). Risk: proves the artifact boots, says nothing about a real target's networking or limits. Given cloud access, I'd point this job there and keep the runner version as a pre-deploy smoke test.
+**Deploy only targets the CI runner**, not a real host — no cloud creds available, but the assignment rules out a fake/echo deploy step, so I made the runner-local version real (pull, run, health check, teardown) instead of skipping it. Doesn't prove anything about a real target's networking or resource limits. Given actual cloud access I'd point this same job there and keep the runner version as a pre-deploy smoke test.
 
-## 5. Actual time / unfinished / next steps
+## 5. Time / unfinished / next
 
-- **Time spent**: ~3 hours across Tasks 1–3, verified against a live Docker daemon and a real GitHub Actions run rather than written and assumed correct.
-- **Deliberately not done**: image vulnerability scanning, graceful shutdown, an alert rule with a fire/recover cycle, staging→production promotion — none attempted, to keep the core checklist solid rather than spreading thin.
-- **GHCR listing not independently verified via API** — the PAT here wasn't scoped for `packages:read`. Relied on `deploy`'s successful `docker pull` by SHA tag instead, which is arguably stronger evidence (the actual consumer, not just a listing).
-- **Next 60 minutes**: graceful shutdown (SIGTERM + drain) paired with a readiness endpoint, since the healthcheck plumbing already exists; then one alert rule (5xx rate > 5% for 5m) with a deliberately triggered and recovered test.
+- 3 hours across tasks 1–3.
+- Didn't do: image scanning, graceful shutdown, an alert with a real fire/recover test, staging→prod promotion. Skipped to keep the core stuff solid instead of spreading thin.
+- Couldn't verify the GHCR package listing through the API — token wasn't scoped for `packages:read`. `deploy`'s successful pull is decent evidence either way.
+- Next hour: graceful shutdown + a readiness probe (healthcheck plumbing's already there), then one alert rule with an actual triggered/recovered test.
 
 ## 6. AI collaboration
 
-The first draft of `scripts/generate-traffic.sh` used bash-style array indexing (`${ids[0]}`), wrong for this environment's zsh shell (1-indexed arrays) — see Section 3 for the full isolation. Caught it via a manual `curl` outside the script rather than trusting the dashboard, then rewrote the script to avoid shell arrays entirely (a temp-file queue) instead of just swapping the index — fixing the bug class, not the instance.
+Used Claude for most of this build. Concrete example: the traffic-generation script it wrote used `${ids[0]}`, which is wrong under zsh (see section 3) — caught by testing a request manually outside the script instead of trusting what the dashboard showed. Fixed it properly (temp file instead of array) rather than just changing the index, since the same 0-vs-1-indexing assumption could've bitten anywhere else in the script too.
