@@ -139,18 +139,58 @@ Reference actual files, jobs, commands, or runtime results. Avoid generic statem
 
 ## Task 5: Cost Scenario Analysis
 
-> A **scenario analysis** task — no code, no cloud purchases. Write it in `deploy/COST.md` (aim for ≤600 words). **If you can get the data, give numbers and queries; if not, state your assumptions and how you would verify them.** We look at both the conclusion and the reasoning.
+> A writing task — no code, and nothing to buy. Write your answer in `deploy/COST.md`, up to 1,000 words. If you can get real data, give numbers and the queries you would run; if you cannot, say what you are assuming and how you would check it. We read the reasoning as closely as the conclusion.
 
-Treat the `task-api` from Tasks 1–4 as part of a larger system that also has a high-write `user_event` table: written to **DynamoDB**, backed up to an **S3** data-lake bucket that downstream **EMR / queries also read**, consumed by services on **EKS**, egressing through **ELB**. The app recently shipped a major revision and its request logic changed. Since then: the monthly **AWS bill is up ~30%** (~$40k→$52k, unblended; last month 31 days vs 30 this month; a batch of RIs / Savings Plans was bought at the start of the quarter), while **business volume grew only ~5%**; the increase is spread across DynamoDB, S3, EKS, and ELB — part tracks write growth, part is not proportional to usage. You have Cost Explorer, the CUR, ~60% of resources tagged, and CloudWatch. Finance and your leader want to know: **why it rose, whether it can come down next month, and how.**
+### The setup
 
-In `deploy/COST.md`, cover:
+Think of the `task-api` from Tasks 1–4 as one small service inside a bigger system. That system also has a `user_event` table that takes a lot of writes:
 
-- **Baseline** — what you look at first and in what unit (e.g. unit cost), and how you separate "usage growth" from "efficiency / waste";
-- **Attribution** — one "observe → hypothesize → verify with which data" chain that breaks the 30% down to specific sources (how you cover the untagged ~40%, whether the multi-service increase shares one root cause, and the confounders you rule out — billing days, RI/SP amortization, one-off charges);
-- **Trade-off** — pick one constraint, give an actionable plan and what you give up: ① you'd buy RIs/SP but this table migrates next quarter; ② cutting at the source needs the APP team, who have no capacity this quarter; ③ your leader wants −30% but only ~15% is really recoverable;
-- **Experience (optional)** — one real optimization's before/after, and how you confirmed the saving came from your change.
+- events are written to **DynamoDB**;
+- the data is copied into an **S3** bucket used as a data lake;
+- services on **EKS** read those events;
+- traffic to the outside goes out through an **ELB**.
 
-Land conclusions on "which data, verified how" rather than a generic cost-cutting checklist; separate a "point fix" from "root-cause governance" and say how you would prevent regression.
+The app team recently shipped a big release that changed how the client sends requests.
+
+### What you are looking at
+
+- The monthly AWS bill went from **~$40k to ~$52k**, about **+30%**.
+- Business volume (daily active users, core request count) grew about **+5%**.
+- The extra cost is spread across DynamoDB, S3, EKS and ELB. Some of it moves with the number of writes; some of it does not move with usage at all.
+- Last month had **31 days**. This month has **30**.
+- A batch of **Reserved Instances and Savings Plans** was bought at the start of the quarter.
+- Those dollar figures are **unblended cost** — the price of each line as it was charged, before any Reserved Instance or Savings Plan discount is averaged out across the account.
+
+### What you can use
+
+- **Cost Explorer** — the console view of spend. You can group it by service, account, region, tag, and usage type (the billing sub-category inside one service, such as write capacity versus stored bytes).
+- **The CUR** (Cost and Usage Report) — an export with one row per charge, including the resource ID.
+- **Tags** — about **60%** of resources carry `team` / `env` tags. The rest carry none.
+- **CloudWatch**, plus whatever service metrics you built in Task 3.
+
+### What we want to know
+
+Finance and your manager are asking three things: **why did it go up, will it come down next month, and what would bring it down.** Answer in `deploy/COST.md`, covering:
+
+**1. Where you start.** What do you look at first to decide whether +30% is even surprising? Pick a unit to measure in — cost per event, per request, per active user — and say why that one. How do you tell "we are simply doing more business" apart from "we are wasting money"?
+
+**2. Where the money went.** Walk through one chain of *what you saw → what you think it is → the exact data that would prove it*, until the 30% is broken into named pieces. On the way, deal with:
+
+- the 40% of resources with no tags — how do you work out who they belong to?
+- four services rising at once — one shared cause, or several separate ones, and how would you tell?
+- the other explanations you have to rule out before you trust your own: the different number of days in the two months, how those Reserved Instance and Savings Plan payments land in the bill, one-off charges.
+
+**3. What you would do.** Pick one of these situations, give a first step you could start on Monday, and say what you give up by choosing it:
+
+- buying Reserved Instances or Savings Plans would help, but this table is being moved to a different store next quarter;
+- the real fix is in the app's request logic, but the app team has no time this quarter;
+- your manager wants 30% off the bill, and your own estimate is that only about 15% is really recoverable.
+
+Separate the one-off fix from the thing that keeps the cost from creeping back up, and say how you would keep it from creeping back.
+
+**4. Something you have done before (optional).** One cost cut you actually made: the numbers before and after, and how you convinced yourself the saving came from your change rather than from business volume moving on its own.
+
+Tie each conclusion to a specific piece of data and to how you would check it. A general list of cost-saving tips is not what we are looking for.
 
 ## AI Conversation Records
 
@@ -173,7 +213,7 @@ Transcript files do not count toward the `deploy/NOTES.md` word limit. If you di
 - [ ] metrics can answer questions about traffic, errors, latency percentiles, and task state;
 - [ ] the Dashboard has been validated with actual business traffic, actual results have been compared with expectations, and at least one signal has been confirmed further;
 - [ ] `deploy/NOTES.md` references real evidence from this submission;
-- [ ] `deploy/COST.md` attributes the cost increase to evidence or explicit assumptions, states a governance trade-off, and separates point optimizations from root-cause governance;
+- [ ] `deploy/COST.md` ties the cost increase to data or to stated assumptions, makes one real trade-off under a constraint, and tells a one-off fix apart from one that keeps the cost down;
 - [ ] if AI was used, `deploy/ai-transcripts/` contains complete, chronological records of all AI interactions, with only sensitive values redacted.
 
 ## Evaluation Focus
@@ -186,7 +226,7 @@ Transcript files do not count toward the `deploy/NOTES.md` word limit. If you di
 | Delivery safety | Whether permissions, credentials, publication conditions, and artifact traceability are reasonable |
 | Observability | Whether metrics and the Dashboard actually support decisions and troubleshooting |
 | Prioritization | Whether you prioritize the highest-value closed loops within the time you actually invest |
-| Cost judgment | Whether you show unit-cost awareness, attribute the increase to evidence, separate point fixes from root-cause governance, and make an actionable trade-off under constraints |
+| Cost judgment | Whether you measure cost per unit of business, trace the increase back to data, tell a one-off fix apart from one that lasts, and make a workable trade-off under a constraint |
 
 ## Optional Bonus
 
