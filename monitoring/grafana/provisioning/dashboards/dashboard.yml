@@ -1,0 +1,17 @@
+
+# Service: Grafana Dashboard Provider
+# Description: Automatically provisions dashboards from the filesystem.
+
+apiVersion: 1
+
+providers:
+  - name: 'Standard Dashboards'
+    orgId: 1
+    type: file
+    disableDeletion: false 
+    editable: true        
+    updateIntervalSeconds: 10 
+    
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

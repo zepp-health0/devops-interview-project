@@ -5,17 +5,121 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  test:
+  validate_code:
+    name: Validate Code & Run Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 ./...
+          
+      - name: Run Linter & Formatter
+        run: |
+          go fmt ./...
+          go vet ./...
+
+      - name: Run unit tests with race detector
+        run: go test -race -count=1 ./...
+
+  container_build:
+    name: Build & Smoke Test Container
+    needs: validate_code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build container
+        run: docker build -t task-api:${{ github.sha }} .
+
+      - name: Smoke test the image
+        run: |
+          # Start the container in the background to test it before pushing.
+          docker run -d --rm --name task-api-ci -p 8080:8080 -e PORT=8080 task-api:${{ github.sha }}
+          
+          # Polls both the local network endpoint and the internal Docker health engine.
+          for i in {1..20}; do
+            # Fetch the internal Docker health status
+            status=$(docker inspect --format '{{.State.Health.Status}}' task-api-ci 2>/dev/null || echo 'starting')
+            
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && [ "$status" = "healthy" ]; then
+              echo "Container is fully healthy and accepting traffic (Docker: $status)"
+              break
+            fi
+            
+            # Fail early if the loop hits the 40-second timeout limit
+            if [ $i -eq 20 ]; then
+              echo "Timeout reached! Final Docker status: $status"
+              curl -fsS http://127.0.0.1:8080/healthz 
+              exit 1
+            fi
+            
+            sleep 2
+          done
+ 
+          # Forcefully stop and remove the test container.
+          docker rm -f task-api-ci
+
+  publish_image:
+    name: Build & Publish Image to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate_code, container_build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Buildx enables the advanced BuildKit engine needed for GHA layer caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/task-api:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/task-api:latest
+          # Layer Caching configuration
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy_application:
+    name: Deploy to Environment
+    if: github.event_name == 'workflow_dispatch'
+    needs: publish_image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy runtime with Docker Compose
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          # Deploy and wait for the native Docker container health check to pass
+          docker compose -f docker-compose.yml up -d --force-recreate --build --wait
+          
+          echo "Deployment successful! Verification response:"
+          curl -fsS http://127.0.0.1:8080/healthz
+          

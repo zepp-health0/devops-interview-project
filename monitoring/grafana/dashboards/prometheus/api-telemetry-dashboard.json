@@ -1,0 +1,183 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Request Volume & Failure Behavior (RPS & Errors)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-stack-datasource"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(task_api_http_requests_total[2m])) by (method, route)",
+          "legendFormat": "{{method}} {{route}} - Total",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(task_api_http_requests_total{status_code=~\"5..\"}[2m])) by (method, route)",
+          "legendFormat": "{{method}} {{route}} - 5xx Errors",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "title": "Business Request Latency Quantiles (P50, P95, P99)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-stack-datasource"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum(rate(task_api_http_request_duration_seconds_bucket{route!=\"/healthz\"}[5m])) by (le, route))",
+          "legendFormat": "{{route}} (P50)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum(rate(task_api_http_request_duration_seconds_bucket{route!=\"/healthz\"}[5m])) by (le, route))",
+          "legendFormat": "{{route}} (P95)",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum(rate(task_api_http_request_duration_seconds_bucket{route!=\"/healthz\"}[5m])) by (le, route))",
+          "legendFormat": "{{route}} (P99)",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "title": "Task State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-stack-datasource"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "task_api_tasks_total",
+          "legendFormat": "Total Tasks",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "task_api_tasks_pending",
+          "legendFormat": "Pending Tasks",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-stack-datasource"
+          },
+          "editorMode": "code",
+          "expr": "task_api_tasks_done",
+          "legendFormat": "Completed Tasks",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "production"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "API Telemetry Dashboard",
+  "uid": "api-telemetry-dashboard",
+  "version": 2
+}

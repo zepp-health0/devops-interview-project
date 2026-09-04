@@ -12,29 +12,35 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Health check — must respond 200 for liveness probes
+	// Health check.
 	mux.HandleFunc("GET /healthz", HealthHandler)
 
-	// Metrics — Prometheus-compatible plaintext endpoint
+	// Prometheus metrics endpoint.
 	mux.HandleFunc("GET /metrics", MetricsHandler(store))
 
-	// Task CRUD
+	// Task API.
 	mux.HandleFunc("GET /tasks", ListTasksHandler(store))
 	mux.HandleFunc("POST /tasks", CreateTaskHandler(store))
 	mux.HandleFunc("GET /tasks/{id}", GetTaskHandler(store))
 	mux.HandleFunc("PUT /tasks/{id}", UpdateTaskHandler(store))
 	mux.HandleFunc("DELETE /tasks/{id}", DeleteTaskHandler(store))
 
+	// Apply metrics to all requests handled by the API.
+	// The middleware itself excludes /metrics from being recorded.
+	handler := instrumentHandler(mux.ServeHTTP)
+
 	addr := ":" + port
 	log.Printf("task-api starting on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
 
 func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
+
 	return fallback
 }

@@ -1,0 +1,20 @@
+
+# Grafana Data Source Provisioner: Automatically registers the Prometheus infrastructure backend
+
+apiVersion: 1
+
+datasources:
+  - name: 'Prometheus'
+    type: prometheus
+    access: proxy           
+    isDefault: true         
+    uid: 'prometheus-stack-datasource'
+    
+    url: 'http://prometheus:9090' 
+
+    # Safely locks the data source in the UI so configuration stays managed by code
+    editable: false 
+    
+    jsonData:
+      httpMethod: POST      # Uses POST for heavy/complex dashboard queries to prevent URL string truncation
+      timeInterval: '15s'   
