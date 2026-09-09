@@ -9,9 +9,8 @@
 2. **In-memory state is acceptable.** `MemoryStore` loses data on restart, so a deploy is a data
    reset — hence the smoke test creates and deletes its own task. A real datastore would need a
    migration gate.
-3. **The existing tests define a contract I may not break.** Task IDs start at 0 and
-   `handler_test.go` string-matches `task_api_tasks_total 2`. Both look like defects; both are
-   load-bearing. I treated them as the spec — see §4.
+3. **The existing tests are a contract.** Task IDs start at 0 and `handler_test.go` string-matches
+   `task_api_tasks_total 2`. Both look like defects; both are load-bearing. Treated as spec — §4.
 
 ## 2. Delivery Path
 
@@ -32,34 +31,37 @@ restores it if verification fails. Nothing else changes.
 Credentials are `GITHUB_TOKEN` only — minted per run, `packages: write` on the publish job alone.
 No PAT is stored.
 
+**Executed, not just authored.** PR run `34392848871` ran `verify` + `image` and published
+nothing (`publish`/`deploy` skipped). Merge `fe25e05` (run `34393201480`) published
+`ghcr.io/byroncustodio/task-api:sha-fe25e05…` at digest `sha256:9185844b…`; `deploy` pulled that
+digest, the container reported healthy and the smoke test passed. Longest path **239 s** against
+the 600 s budget.
+
 **Validation boundary:** the environment is ephemeral, torn down with the runner — a real rollout
 of a real published artifact, not a long-lived URL.
 
-**Task 1 evidence** (`make image-verify` re-checks all three): `docker image inspect --format
-'{{.Size}}'` reports **3,926,139 bytes**, Docker reports the container `healthy`, and the process
-runs as **UID 65532**. Note the measurement is store-dependent: under the containerd image store
-that command returns the *compressed* total, while the classic store would report the ~14.1 MB
+**Task 1 evidence** (`make image-verify` re-checks all three): `docker image inspect` reports
+**3,926,139 bytes**, Docker reports `healthy`, the process runs as **UID 65532**. The measurement
+is store-dependent — containerd returns the *compressed* total, the classic store the ~14.1 MB
 uncompressed figure. Both pass, but the classic-store margin is only ~10%.
 
 ## 3. One Actual Validation or Investigation
 
-**Question:** are the reported latency percentiles true?
-
-**Expected:** an in-memory map should answer in tens of microseconds.
+**Question:** are the reported latency percentiles true? An in-memory map should answer in tens
+of microseconds.
 
 **Observed:** `histogram_quantile` gave **p50 2.5 ms, p95 4.75 ms, p99 4.95 ms**; `sum/count`
 gave a true mean of **0.176 ms** — a ~28× discrepancy.
 
-**Isolating the cause.** Either the service is slow, the experiment is wrong, or the instrument is.
+**Isolating it.** Either the service is slow, the experiment is wrong, or the instrument is.
 - Raw buckets for `GET /tasks/{id}` showed **all 55 observations in the first bucket** (every
   cumulative count identical). `DefBuckets` starts at 5 ms, so `histogram_quantile` could only
   interpolate inside `[0, 0.005]`.
 - An independent client measurement (`curl -w '%{time_total}'`, 30 requests) gave p50 1.9 ms
   *including* process startup and TCP connect — an upper bound that still excluded 4.95 ms.
 
-The service was fine; the instrument was wrong.
-
-**Change:** re-bucketed from the measured distribution, starting at 25 µs (`metrics.go`).
+The service was fine; the instrument was wrong. **Change:** re-bucketed from the measured
+distribution, starting at 25 µs (`metrics.go`).
 
 **Re-validation caught a second problem.** The first re-run still reported p99 ≈ 4.96 ms —
 methodological: `rate(...[5m])` spanned *both* bucket schemas, so `sum by (le)` merged two
@@ -68,8 +70,8 @@ p99 0.697 ms** against a mean of 0.173 ms.
 
 **Signal confirmed further:** `GET /metrics` is the slowest route at **3.17 ms**, 15–108× any
 business route, and scraped every 5 s forever. **112 of its 185 series are latency buckets** — my
-own re-bucketing grew that from 84. Resolution is not free; it is paid on every scrape. Hence the
-dashboard excludes `/metrics` and `/healthz` from business panels.
+re-bucketing grew that from 84. Resolution is paid for on every scrape. Hence the dashboard
+excludes `/metrics` and `/healthz` from business panels.
 
 **A second defect surfaced:** the 5xx panel rendered *empty*, not zero — `sum(rate(...))` over a
 non-existent series returns an empty vector, so "no errors" was indistinguishable from "broken
@@ -84,14 +86,13 @@ existing dashboard or alert, so I kept the legacy names and added a correctly-na
 this** given ownership of downstream consumers plus a deprecation window.
 
 **(b) Deploy to ephemeral Compose rather than a cluster.** The alternative was Kubernetes
-manifests validated only with `--dry-run`. A deploy that runs, verifies and rolls back is worth
-more than manifests nobody applied. Given up: rolling updates, replicas, a real scheduler.
-**I would change this** once a staging cluster and credentials exist — `deploy.sh` is the only
-file that moves.
+manifests validated only with `--dry-run`. A deploy that runs, verifies and rolls back beats
+manifests nobody applied. Given up: rolling updates, replicas, a scheduler. **I would change
+this** once a staging cluster exists — `deploy.sh` is the only file that moves.
 
 ## 5. Actual Time Spent
 
-- **Actual time spent:** ~1.5 h wall-clock, one session (transcript timestamps 16:45Z onward).
+- **Actual time spent:** ~2.5 h wall-clock, one session (transcript timestamps 16:45Z onward).
 - **Left out:** multi-arch images (CI builds `linux/amd64`; the size budget was verified on
   `arm64` locally, and QEMU cross-builds would blow the 10-minute budget); alerting rules;
   graceful shutdown; staging→production promotion. No bonus item — the core loops were worth
@@ -108,8 +109,8 @@ Claude Code (CLI), model `claude-opus-5`. Every prompt and visible response is c
 | `deploy/ai-transcripts/2026-09-09-claude-code-f25b4b70.md` | short setup session |
 | `deploy/ai-transcripts/2026-09-09-claude-code-d981d324.md` | the full implementation session |
 
-Exported from the Claude Code session logs by `scripts/export-ai-transcript.py`, in chronological
-order, with sensitive values replaced by `[REDACTED: reason]`.
+Exported from the session logs by `scripts/export-ai-transcript.py`, chronological, with
+sensitive values replaced by `[REDACTED: reason]`.
 
 **Output I rejected.** The first draft of `metrics.go` shipped tuned latency buckets with a
 comment stating they "were chosen from the distribution actually measured via
