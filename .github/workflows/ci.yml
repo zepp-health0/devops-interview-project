@@ -5,17 +5,216 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
+# Least privilege by default; jobs widen this only where they must.
 permissions:
   contents: read
 
+# A newer push to the same ref makes the in-flight run obsolete. Cancelling keeps queue time down
+# and keeps the validation path inside its time budget.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/task-api
+
 jobs:
-  test:
+  verify:
+    name: Static analysis, tests and build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 ./...
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+
+      # The race detector matters here specifically: MemoryStore is shared mutable state behind a
+      # RWMutex and TestMemoryStoreConcurrency drives it from 100 goroutines.
+      - name: Tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o /dev/null .
+
+  # Pull requests validate that the image still builds, but publish nothing. A PR is untrusted
+  # input, so it gets no credentials and produces no external side effects.
+  image:
+    name: Build image (no publish)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: task-api:pr-${{ github.event.pull_request.number }}
+          build-args: |
+            VERSION=pr-${{ github.event.pull_request.number }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Task 1's size limit is a release criterion, so it is enforced by the pipeline rather than
+      # left to whoever remembers to check.
+      - name: Enforce image size budget
+        run: |
+          limit=$((15 * 1024 * 1024))
+          size=$(docker image inspect task-api:pr-${{ github.event.pull_request.number }} --format '{{.Size}}')
+          echo "image size: ${size} bytes (limit ${limit})"
+          [ "$size" -lt "$limit" ] || { echo "image exceeds 15 MiB"; exit 1; }
+
+      - name: Verify the container actually reports healthy and runs as non-root
+        run: |
+          docker run -d --name probe -p 8080:8080 task-api:pr-${{ github.event.pull_request.number }}
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' probe)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "health: $(docker inspect --format '{{.State.Health.Status}}' probe)"
+          [ "$(docker inspect --format '{{.State.Health.Status}}' probe)" = healthy ]
+          uid=$(docker top probe -o user | tail -n +2 | awk '{print $1}' | head -1)
+          echo "process uid: $uid"
+          [ "$uid" != "0" ] && [ "$uid" != "root" ]
+          test "$(curl -fsS localhost:8080/healthz)" = '{"status":"ok"}'
+          docker rm -f probe
+
+  # Only pushes to main publish. This is the trust boundary: code here has already been reviewed
+  # and merged.
+  publish:
+    name: Publish image to GHCR
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Computed in a step rather than read from the workflow env: GHCR rejects uppercase path
+      # components, and an owner name is not guaranteed to be lowercase.
+      - name: Resolve image name
+        id: meta
+        run: echo "image=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN is minted per run and expires with it. No long-lived PAT is stored anywhere,
+      # and the value never appears in logs because Actions masks it.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # sha- tag for humans, digest for machines. The OCI revision label means the commit can
+          # be recovered from the image alone, without consulting the registry's tag list.
+          tags: |
+            ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          build-args: |
+            VERSION=sha-${{ github.sha }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record published artifact
+        run: |
+          {
+            echo "### Published image"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+            echo "commit: ${{ github.sha }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Real deployment: pulls the digest that was just published and rolls it out with the same
+  # script an operator runs locally. The environment is ephemeral (it lives and dies with the
+  # runner), which the README explicitly allows.
+  deploy:
+    name: Deploy published image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: publish
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Addressed by digest, not by tag: a tag can be moved to point at different content, so
+      # deploying :latest would mean the running container is not provably the artifact that
+      # passed the checks above.
+      - name: Deploy by digest
+        env:
+          TASK_API_IMAGE: ${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}
+        run: ./deploy/deploy.sh
+
+      - name: Show what is running
+        run: |
+          docker compose -p task-api-deploy -f deploy/docker-compose.deploy.yml ps
+          {
+            echo "### Deployed"
+            echo
+            echo '```'
+            echo "${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tear down the ephemeral environment
+        if: always()
+        env:
+          TASK_API_IMAGE: ${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}
+        run: docker compose -p task-api-deploy -f deploy/docker-compose.deploy.yml down -v || true

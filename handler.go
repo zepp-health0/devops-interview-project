@@ -21,7 +21,9 @@ type Task struct {
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		log.Printf("writing healthz response: %v", err)
+	}
 }
 
 func ListTasksHandler(store Store) http.HandlerFunc {
@@ -104,5 +106,9 @@ func DeleteTaskHandler(store Store) http.HandlerFunc {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// The status line and headers are already committed, so the response cannot be changed
+		// to report this. Logging is the only remaining action.
+		log.Printf("writing json response: %v", err)
+	}
 }

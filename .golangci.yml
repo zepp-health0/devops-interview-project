@@ -1,0 +1,15 @@
+version: "2"
+
+# Static analysis for CI. The default linter set (errcheck, govet, ineffassign, staticcheck,
+# unused) is enough here; adding more would mostly generate noise on a codebase this size.
+linters:
+  exclusions:
+    generated: lax
+    rules:
+      # Production code must handle every error. Test code is exempt from errcheck only:
+      # an unchecked http.Get in a test cannot hide a failure, because the assertion that
+      # follows it fails anyway, and threading error checks through every request line makes
+      # the tests harder to read than the behaviour they describe.
+      - path: _test\.go
+        linters:
+          - errcheck
