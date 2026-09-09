@@ -1,5 +1,19 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  # 5s rather than the usual 15s: this stack is used for short, hand-driven validation runs, and a
+  # 15s interval leaves a one-minute experiment with only four points per series.
+  scrape_interval: 5s
+  evaluation_interval: 5s
 
-scrape_configs: []
+scrape_configs:
+  # "app" is the compose service name. Using localhost here is the classic failure mode: it would
+  # resolve to the Prometheus container itself and the target would sit DOWN with a connection
+  # refused that looks like an application problem.
+  - job_name: task-api
+    static_configs:
+      - targets: ["app:8080"]
+        labels:
+          service: task-api
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
