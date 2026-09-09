@@ -6,7 +6,10 @@
 
 services:
   app:
-    image: ${TASK_API_IMAGE:?TASK_API_IMAGE must be set to a digest-pinned image reference}
+    # Deliberately defaulted rather than guarded with ":?". Compose validates this field even for
+    # `down`, so a hard guard would make tearing the stack down impossible without knowing which
+    # image is running. deploy.sh validates TASK_API_IMAGE before it does anything.
+    image: ${TASK_API_IMAGE:-task-api:unset}
     ports:
       - "${TASK_API_PORT:-8080}:8080"
     environment:

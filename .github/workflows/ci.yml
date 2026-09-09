@@ -100,9 +100,10 @@ jobs:
           done
           echo "health: $(docker inspect --format '{{.State.Health.Status}}' probe)"
           [ "$(docker inspect --format '{{.State.Health.Status}}' probe)" = healthy ]
-          uid=$(docker top probe -o user | tail -n +2 | awk '{print $1}' | head -1)
+          uid=$(docker top probe | awk 'NR==2{print $1}')
           echo "process uid: $uid"
-          [ "$uid" != "0" ] && [ "$uid" != "root" ]
+          # Fail on an empty read too: an unreadable uid must not pass as "not root".
+          [ -n "$uid" ] && [ "$uid" != "0" ] && [ "$uid" != "root" ]
           test "$(curl -fsS localhost:8080/healthz)" = '{"status":"ok"}'
           docker rm -f probe
 
