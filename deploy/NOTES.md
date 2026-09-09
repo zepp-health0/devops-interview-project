@@ -74,7 +74,7 @@ re-bucketing grew that from 84. Resolution is paid for on every scrape. Hence th
 excludes `/metrics` and `/healthz` from business panels.
 
 **A second defect surfaced:** the 5xx panel rendered *empty*, not zero — `sum(rate(...))` over a
-non-existent series returns an empty vector, so "no errors" was indistinguishable from "broken
+non-existent series returns an empty vector, making "no errors" indistinguishable from "broken
 metric". Fixed with `or vector(0)`.
 
 ## 4. Two Engineering Trade-offs
@@ -97,8 +97,8 @@ this** once a staging cluster exists — `deploy.sh` is the only file that moves
   `arm64` locally, and QEMU cross-builds would blow the 10-minute budget); alerting rules;
   graceful shutdown; staging→production promotion. No bonus item — the core loops were worth
   more than a sixth artifact.
-- **Next 60 minutes:** a triggerable alert on the 4xx ratio, demonstrated firing and recovering,
-  since the error-ratio panel is currently trusted without ever having been seen to fire.
+- **Next 60 minutes:** a triggerable alert on the 4xx ratio, shown firing and recovering — that
+  panel is currently trusted without ever having been seen to fire.
 
 ## 6. Use of AI
 
@@ -110,7 +110,8 @@ Claude Code (CLI), model `claude-opus-5`. Every prompt and visible response is c
 | `deploy/ai-transcripts/2026-09-09-claude-code-d981d324.md` | the full implementation session |
 
 Exported from the session logs by `scripts/export-ai-transcript.py`, chronological, with
-sensitive values replaced by `[REDACTED: reason]`.
+sensitive values replaced by `[REDACTED: reason]`. A transcript cannot contain the commit that
+adds it, so the record ends at its own export; `make transcripts` regenerates it.
 
 **Output I rejected.** The first draft of `metrics.go` shipped tuned latency buckets with a
 comment stating they "were chosen from the distribution actually measured via
