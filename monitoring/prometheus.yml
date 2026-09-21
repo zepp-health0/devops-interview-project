@@ -1,5 +1,33 @@
 global:
-  scrape_interval: 15s
+  # 5s is deliberately tighter than a production default (15-30s). This stack
+  # exists to be demonstrated in a few minutes, and rate() needs at least four
+  # samples in the window to produce a trustworthy value -- at 30s scrape, a
+  # rate(...[1m]) panel would show nothing useful for the first two minutes.
+  #
+  # The cost is 6x the sample volume. Fine for a single target with ~40 series;
+  # not what you would run against a fleet.
+  scrape_interval: 5s
+  scrape_timeout: 3s
   evaluation_interval: 15s
 
-scrape_configs: []
+  external_labels:
+    env: local
+    service: task-api
+
+scrape_configs:
+  - job_name: task-api
+    metrics_path: /metrics
+    static_configs:
+      # Service name from docker-compose, resolved on the "obs" network.
+      # Not localhost: that would be the Prometheus container itself.
+      - targets: ["task-api:8080"]
+        labels:
+          instance: task-api:8080
+
+  # Prometheus scraping itself. Cheap, and it gives a control signal: if the
+  # task-api target goes stale but this one does not, the problem is the app or
+  # the network, not the scrape loop.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+

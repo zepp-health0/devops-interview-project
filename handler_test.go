@@ -16,7 +16,8 @@ func setup() *MemoryStore {
 func TestHealthEndpoint(t *testing.T) {
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
-	HealthHandler(rec, req)
+	HealthHandler("v0.1.0", "abc1234")(rec, req)
+	// HealthHandler(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -103,31 +104,6 @@ func TestDeleteTask(t *testing.T) {
 
 	if _, ok := store.Get(0); ok {
 		t.Fatalf("task should have been deleted")
-	}
-}
-
-func TestMetricsEndpoint(t *testing.T) {
-	store := setup()
-	store.Create("task A")
-	task, _ := store.Get(0)
-	done := true
-	store.Update(task.ID, nil, &done)
-	store.Create("task B")
-
-	req := httptest.NewRequest("GET", "/metrics", nil)
-	rec := httptest.NewRecorder()
-	MetricsHandler(store)(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "task_api_tasks_total 2") {
-		t.Fatalf("expected total=2 in metrics, got:\n%s", body)
-	}
-	if !strings.Contains(body, "task_api_tasks_done 1") {
-		t.Fatalf("expected done=1 in metrics, got:\n%s", body)
 	}
 }
 

@@ -1,7 +1,86 @@
+name: task-api
+
 services:
-  app:
-    build: .
+  task-api:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: task-api:${VERSION:-dev}
+    container_name: task-api
     ports:
       - "8080:8080"
     environment:
       PORT: "8080"
+    # The image is scratch-based: no shell, no curl, no wget. The binary
+    # probes itself. Anything of the form ["CMD-SHELL", ...] would fail here.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/task-api", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 3s
+      retries: 3
+    restart: unless-stopped
+    networks: [obs]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      # Needed so a config change can be applied without restarting the
+      # container (and losing the TSDB head block):
+      #   curl -XPOST localhost:9090/-/reload
+      - --web.enable-lifecycle
+    # Waiting for the app to be healthy rather than merely started avoids a
+    # burst of "connection refused" scrapes that look like a real outage on
+    # the dashboard's first minute.
+    depends_on:
+      task-api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [obs]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous viewer access so the stack is demonstrable without a login
+      # step. Admin still requires the password below. Do not copy this into
+      # anything internet-facing.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: light
+      # Deep-link straight to the dashboard instead of the empty home page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/task-api.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks: [obs]
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  obs:
+    driver: bridge
+
+

@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # The dashboard JSON references this uid directly. If you rename it here,
+    # rename it there too or every panel reports "datasource not found" -- the
+    # single most common reason a provisioned dashboard renders empty.
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match scrape_interval in monitoring/prometheus.yml. Grafana uses
+      # this to pick a sensible $__rate_interval; if it is wrong, rate()
+      # queries silently return gaps.
+      timeInterval: 5s
+      httpMethod: POST
