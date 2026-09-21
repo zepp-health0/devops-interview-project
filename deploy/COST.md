@@ -1,28 +1,27 @@
 <!-- # Cost Scenario Analysis (Task 5)
 
-> This is the deliverable for Task 5. **If you can access the data, provide specific numbers and queries. If you cannot, state your key assumptions, the data you would use to validate them, and how your conclusions would change if they proved false.** Tie each conclusion to the data and validation method instead of listing generic cost-cutting ideas. Aim for no more than 600 words.
+> This is where you answer Task 5. Up to 1,000 words. If you can get real data, give numbers and the queries you would run. If you cannot, write down what you are assuming, how you would check it, and what would change if the assumption turned out to be wrong. Tie each conclusion to a specific piece of data and to how you would check it — a general list of cost-saving tips is not what we are looking for.
 
-## 1. Establish the Baseline
+## 1. Where You Start
 
-Which data would you inspect first to decide whether the increase is expected? How would you separate usage growth from lower efficiency or waste? Which unit would you use, such as cost per event, request, or daily active user?
+What do you look at first to decide whether +30% is even surprising? Which unit do you measure in — cost per event, per request, per active user — and why that one? How do you tell "we are simply doing more business" apart from "we are wasting money"?
 
-## 2. Attribution Approach (Observe → Hypothesize → Verify)
+## 2. Where the Money Went
 
-Describe one investigation chain that breaks the 30% increase down to specific sources. Explain which data you would use at each step:
+Walk through one chain of *what you saw → what you think it is → the exact data that would prove it*, until the 30% is broken into named pieces. Say which data you would use at each step:
 
-- which dimensions you would start with, such as service, usage type, account, Region, or tag, and how you would attribute the untagged 40%;
-- how you would determine whether increases across several services share one root cause;
-- which confounding factors you would rule out at each step, such as billing-period length, RI or Savings Plan amortization, and one-time charges.
+- which dimension you split by first — service, usage type, account, region, tag;
+- the 40% of resources with no tags: how do you work out who they belong to?
+- four services rising at once: one shared cause, or several separate ones, and how would you tell?
+- the other explanations you have to rule out before you trust your own: the different number of days in the two months, how those Reserved Instance and Savings Plan payments land in the bill, one-off charges.
 
-## 3. Actions and Trade-offs
+## 3. What You Would Do
 
-Choose one constraint. Give an actionable first step, a fallback option, and what you would give up:
+Pick one of the three situations in the README. Give a first step you could start on Monday, a fallback if it does not work, and what you give up by choosing it.
 
-- you want to use committed-use discounts such as RIs or Savings Plans, but the event table is scheduled to migrate next quarter;
-- reducing volume at the source depends on the app team, but that team has no capacity this quarter;
-- last month you expected costs to fall, but this month they reached a new high, and you must set honest expectations with your leader.
+Then separate the one-off fix from the thing that keeps the cost from creeping back up, and say how you would keep it from creeping back.
 
-Separate one-time point optimizations from root-cause governance or long-term controls, and explain how you would prevent the cost from returning.
+## 4. Something You Have Done Before (Optional)
 
 ## 4. Supporting Experience (Optional)
 
@@ -63,3 +62,4 @@ What I give up: I will not buy DynamoDB reserved capacity, even though it is the
 Root-cause governance, needs APP (~the other 13%): batch writes, dedupe duplicate events. Deferred to next quarter's capacity, tracked as a named debt item rather than silently dropped.
 
 Preventing regression is the actual deliverable. Publish $/1k events as a CloudWatch metric, alert at +10% week-over-week, and review it per deploy. This month's failure was not overspending — it was a revision changing unit economics and nobody noticing for 30 days. A lifecycle policy is a point fix; a unit-cost signal tied to deploys is the fix that stops the next one.
+One cost cut you actually made: the numbers before and after, and how you convinced yourself the saving came from your change rather than from business volume moving on its own.
